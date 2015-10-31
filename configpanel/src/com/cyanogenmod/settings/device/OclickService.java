@@ -16,6 +16,8 @@
 
 package com.cyanogenmod.settings.device;
 
+import java.util.UUID;
+
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -30,6 +32,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.SharedPreferences.OnSharedPreferenceChangeListener;
 import android.hardware.input.InputManager;
 import android.media.AudioManager;
 import android.media.Ringtone;
@@ -45,10 +48,7 @@ import android.view.KeyEvent;
 
 import com.cyanogenmod.settings.device.utils.Constants;
 
-import java.util.UUID;
-
-public class OclickService extends Service implements
-        SharedPreferences.OnSharedPreferenceChangeListener {
+public class OclickService extends Service implements OnSharedPreferenceChangeListener {
 
     private static final String TAG = OclickService.class.getSimpleName();
     private static final UUID sTriggerServiceUUID =
@@ -129,50 +129,38 @@ public class OclickService extends Service implements
         private static final int KEYTYPE_MASK = 0xf;
     }
 
-    public static boolean sOclickConnected = false;
-
     private BluetoothGatt mBluetoothGatt;
-    private Handler mHandler = new Handler();
-    private boolean mAlerting;
+    private Handler mHandler;
+    boolean mAlerting;
+    private Handler mRssiPoll = new Handler();
     private BluetoothDevice mOClickDevice;
     private AudioManager mAudioManager;
-    private boolean mTapPending = false;
-    private Ringtone mRingtone;
 
-    private Runnable mSingleTapRunnable = new Runnable() {
-        @Override
-        public void run() {
-            injectKey(KeyEvent.KEYCODE_CAMERA);
-            mTapPending = false;
-        }
-    };
-    private Runnable mRssiPollRunnable =  new Runnable() {
-        @Override
-        public void run() {
-            mBluetoothGatt.readRemoteRssi();
-            mHandler.postDelayed(this, 2000);
-        }
-    };
+    public static boolean isConnectedToOclick = false;
 
-    private BroadcastReceiver mReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            if (intent.getAction().equals(CANCEL_ALERT_PHONE)) {
-                stopPhoneLocator();
-            }
-        }
-    };
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    private void sendCommand(int command) {
+        Log.d(TAG, "sendCommand : " + command);
+        Intent i = new Intent(BluetoothInputSettings.PROCESS_COMMAND_ACTION);
+        i.putExtra(BluetoothInputSettings.COMMAND_KEY, command);
+        sendBroadcast(i);
+    }
 
     private BluetoothGattCallback mGattCallback = new BluetoothGattCallback() {
+
         @Override
         public void onConnectionStateChange(BluetoothGatt gatt, int status, final int newState) {
             Log.d(TAG, "onConnectionStateChange " + status + " " + newState);
             if (newState == BluetoothGatt.STATE_CONNECTED) {
                 mBluetoothGatt = gatt;
-                sOclickConnected = true;
+                isConnectedToOclick = true;
                 gatt.discoverServices();
             } else if (newState == BluetoothGatt.STATE_DISCONNECTED) {
-                sOclickConnected = false;
+                isConnectedToOclick = false;
                 stopSelf();
             }
             sendCommand(newState);
@@ -216,7 +204,7 @@ public class OclickService extends Service implements
 
                 toggleRssiListener();
 
-                boolean alert = Constants.isPreferenceEnabled(OclickService.this,
+                boolean alert = Constants.isPreferenceEnabled(getBaseContext(),
                         Constants.OCLICK_DISCONNECT_ALERT_KEY, true);
                 service = mBluetoothGatt.getService(sLinkLossServiceUUID);
                 trigger = service.getCharacteristic(sLinkLossCharacteristicUUID);
@@ -306,47 +294,66 @@ public class OclickService extends Service implements
                 mBluetoothGatt.writeCharacteristic(charS);
             }
         }
+
     };
 
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
+    boolean mTapPending = false;
+
+    private Runnable mSingleTapRunnable = new Runnable() {
+        @Override
+        public void run() {
+            injectKey(KeyEvent.KEYCODE_CAMERA);
+            mTapPending = false;
+        }
+    };
+    private Ringtone mRingtone;
+
+    private void toggleRssiListener() {
+        boolean fence = Constants.isPreferenceEnabled(
+                getBaseContext(), Constants.OCLICK_FENCE_KEY, true);
+        mRssiPoll.removeCallbacksAndMessages(null);
+        if (fence) {
+            Log.d(TAG, "Enabling rssi listener");
+            mRssiPoll.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    mBluetoothGatt.readRemoteRssi();
+                    mRssiPoll.postDelayed(this, 2000);
+                }
+            }, 100);
+        }
     }
 
     @Override
     public void onCreate() {
         mHandler = new Handler();
-
-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        prefs.registerOnSharedPreferenceChangeListener(this);
-
+        PreferenceManager.getDefaultSharedPreferences(this)
+                .registerOnSharedPreferenceChangeListener(this);
         IntentFilter filter = new IntentFilter();
         filter.addAction(CANCEL_ALERT_PHONE);
         registerReceiver(mReceiver, filter);
-
         RingtoneManager ringtoneManager = new RingtoneManager(this);
         ringtoneManager.setType(RingtoneManager.TYPE_ALARM);
         int length = ringtoneManager.getCursor().getCount();
         for (int i = 0; i < length; i++) {
             mRingtone = ringtoneManager.getRingtone(i);
-            if (mRingtone != null && mRingtone.getTitle(this).toLowerCase().contains("barium")) {
+            if (mRingtone != null && mRingtone.getTitle(this)
+                    .toLowerCase().contains("barium")) {
                 break;
             }
         }
-        mAudioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        mAudioManager = (AudioManager)getSystemService(Context.AUDIO_SERVICE);
     }
 
-    @Override
-    public void onDestroy() {
-        Log.d(TAG, "Service being killed");
-        mHandler.removeCallbacksAndMessages(null);
-        mBluetoothGatt.disconnect();
-        mBluetoothGatt.close();
-
-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        prefs.unregisterOnSharedPreferenceChangeListener(this);
-        unregisterReceiver(mReceiver);
-    }
+    AlarmCancel mReceiver = new AlarmCancel();
+    class AlarmCancel extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent.getAction().equals(CANCEL_ALERT_PHONE)) {
+                stopPhoneLocator();
+            }
+        }
+    };
 
     @Override
     public void onSharedPreferenceChanged(SharedPreferences sharedPreferences,
@@ -354,8 +361,8 @@ public class OclickService extends Service implements
         if (key.equals(Constants.OCLICK_FENCE_KEY)) {
             toggleRssiListener();
         } else if (key.equals(Constants.OCLICK_DISCONNECT_ALERT_KEY)) {
-            boolean alert = Constants.isPreferenceEnabled(this,
-                    Constants.OCLICK_DISCONNECT_ALERT_KEY, true);
+            boolean alert = Constants.isPreferenceEnabled(
+                    getBaseContext(), Constants.OCLICK_DISCONNECT_ALERT_KEY, true);
             BluetoothGattService service =
                     mBluetoothGatt.getService(sLinkLossServiceUUID);
             BluetoothGattCharacteristic trigger =
@@ -376,9 +383,20 @@ public class OclickService extends Service implements
                 Log.e(TAG, "No bluetooth device provided");
                 stopSelf();
             }
-            mOClickDevice.connectGatt(this, false, mGattCallback);
+            mOClickDevice.connectGatt(getBaseContext(), false, mGattCallback);
         }
         return Service.START_REDELIVER_INTENT;
+    }
+
+    @Override
+    public void onDestroy() {
+        Log.d(TAG, "Service being killed");
+        mRssiPoll.removeCallbacksAndMessages(null);
+        mBluetoothGatt.disconnect();
+        mBluetoothGatt.close();
+        PreferenceManager.getDefaultSharedPreferences(this)
+                .unregisterOnSharedPreferenceChangeListener(this);
+        unregisterReceiver(mReceiver);
     }
 
     private void startPhoneLocator() {
@@ -389,15 +407,15 @@ public class OclickService extends Service implements
                 mAudioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0);
         mRingtone.play();
 
-        Notification.Builder builder = new Notification.Builder(this);
+        Notification.Builder builder = new Notification.Builder(OclickService.this);
         builder.setSmallIcon(R.drawable.locator_icon);
-        builder.setContentTitle(getString(R.string.oclick_locator_notification_title));
-        builder.setContentText(getString(R.string.oclick_locator_notification_text));
+        builder.setContentTitle("O-Click phone locator");
+        builder.setContentText("Locator alert is playing. Tap to dismiss");
         builder.setAutoCancel(true);
         builder.setOngoing(true);
 
-        PendingIntent resultPendingIntent = PendingIntent.getBroadcast(this,
-                0, new Intent(CANCEL_ALERT_PHONE), 0);
+        PendingIntent resultPendingIntent = PendingIntent.getBroadcast(
+                getBaseContext(), 0, new Intent(CANCEL_ALERT_PHONE), 0);
         builder.setContentIntent(resultPendingIntent);
 
         NotificationManager notificationManager =
@@ -423,21 +441,5 @@ public class OclickService extends Service implements
         im.injectInputEvent(new KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode,
                 0, 0, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0, InputDevice.SOURCE_KEYBOARD),
                 InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
-    }
-
-    private void toggleRssiListener() {
-        boolean fence = Constants.isPreferenceEnabled(this, Constants.OCLICK_FENCE_KEY, true);
-        mHandler.removeCallbacks(mRssiPollRunnable);
-        if (fence) {
-            Log.d(TAG, "Enabling rssi listener");
-            mHandler.postDelayed(mRssiPollRunnable, 100);
-        }
-    }
-
-    private void sendCommand(int command) {
-        Log.d(TAG, "sendCommand : " + command);
-        Intent i = new Intent(BluetoothInputSettings.PROCESS_COMMAND_ACTION);
-        i.putExtra(BluetoothInputSettings.COMMAND_KEY, command);
-        sendBroadcast(i);
     }
 }
