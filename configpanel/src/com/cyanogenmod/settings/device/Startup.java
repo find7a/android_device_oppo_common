@@ -48,7 +48,6 @@ public class Startup extends BroadcastReceiver {
             if (!hasTouchscreenGestures()) {
                 disableComponent(context, TouchscreenGestureSettings.class.getName());
             } else {
-                enableComponent(context, TouchscreenGestureSettings.class.getName());
                 // Restore nodes to saved preference values
                 for (String pref : Constants.sNodePreferenceMap.keySet()) {
                     boolean defaultValue = Constants.sNodeDefaultMap.get(pref);
